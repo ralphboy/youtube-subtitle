@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { readFile, unlink } from "fs/promises";
+import { readFile, unlink, readdir } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
@@ -31,33 +31,58 @@ function extractVideoId(url: string): string | null {
   return null;
 }
 
-function parseSrt(srt: string): Caption[] {
+function parseTimestamp(ts: string): number {
+  // 支援 SRT "00:01:23,456" 和 VTT "00:01:23.456"
+  const match = ts.match(/(\d{2}):(\d{2}):(\d{2})[,.](\d{3})/);
+  if (!match) return 0;
+  return (
+    parseInt(match[1]) * 3600 +
+    parseInt(match[2]) * 60 +
+    parseInt(match[3]) +
+    parseInt(match[4]) / 1000
+  );
+}
+
+function parseSubtitle(content: string): Caption[] {
   const captions: Caption[] = [];
-  const blocks = srt.trim().split(/\n\n+/);
+  const seen = new Set<string>();
+
+  // 移除 VTT header 和 metadata
+  const cleaned = content
+    .replace(/^WEBVTT[\s\S]*?\n\n/, "")
+    .replace(/^Kind:.*\n/gm, "")
+    .replace(/^Language:.*\n/gm, "")
+    .replace(/<[^>]+>/g, ""); // 移除 HTML 標籤如 <c>, </c>
+
+  const blocks = cleaned.trim().split(/\n\n+/);
 
   for (const block of blocks) {
-    const lines = block.split("\n");
-    if (lines.length < 3) continue;
+    const lines = block.split("\n").filter((l) => l.trim());
+    if (lines.length < 2) continue;
 
-    const timeMatch = lines[1].match(
-      /(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})/
-    );
-    if (!timeMatch) continue;
+    // 找到時間軸那一行
+    let timeLineIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes("-->")) {
+        timeLineIdx = i;
+        break;
+      }
+    }
+    if (timeLineIdx === -1) continue;
 
-    const startSec =
-      parseInt(timeMatch[1]) * 3600 +
-      parseInt(timeMatch[2]) * 60 +
-      parseInt(timeMatch[3]) +
-      parseInt(timeMatch[4]) / 1000;
+    const timeParts = lines[timeLineIdx].split("-->");
+    if (timeParts.length !== 2) continue;
 
-    const endSec =
-      parseInt(timeMatch[5]) * 3600 +
-      parseInt(timeMatch[6]) * 60 +
-      parseInt(timeMatch[7]) +
-      parseInt(timeMatch[8]) / 1000;
+    const startSec = parseTimestamp(timeParts[0].trim());
+    const endSec = parseTimestamp(timeParts[1].trim().split(" ")[0]);
 
-    const text = lines.slice(2).join(" ").trim();
+    const textLines = lines.slice(timeLineIdx + 1);
+    const text = textLines.join(" ").trim();
     if (!text) continue;
+
+    // 去重（VTT 自動字幕常有重複行）
+    if (seen.has(text)) continue;
+    seen.add(text);
 
     captions.push({
       start: startSec.toFixed(3),
@@ -79,25 +104,18 @@ async function listAvailableLangs(videoId: string): Promise<string[]> {
 
     const langs: string[] = [];
     const lines = stdout.split("\n");
-    let inAutoSection = false;
-    let inManualSection = false;
+    let inSection = false;
 
     for (const line of lines) {
-      if (line.includes("Available automatic captions")) {
-        inAutoSection = true;
-        inManualSection = false;
-        continue;
-      }
-      if (line.includes("Available subtitles")) {
-        inManualSection = true;
-        inAutoSection = false;
+      if (line.includes("Available automatic captions") || line.includes("Available subtitles")) {
+        inSection = true;
         continue;
       }
       if (line.startsWith("Language")) continue;
 
-      if ((inAutoSection || inManualSection) && line.trim()) {
+      if (inSection && line.trim()) {
         const langMatch = line.match(/^(\S+)/);
-        if (langMatch && !langMatch[1].includes("-en")) {
+        if (langMatch && !langMatch[1].includes("-")) {
           langs.push(langMatch[1]);
         }
       }
@@ -131,11 +149,11 @@ export async function POST(request: NextRequest) {
         "--write-sub",
         "--write-auto-sub",
         "--sub-lang", subLang,
-        "--sub-format", "srt",
+        "--sub-format", "srt/vtt/best",
         "--skip-download",
         "-o", tempPath,
         `https://www.youtube.com/watch?v=${videoId}`,
-      ], { timeout: 30000 });
+      ], { timeout: 60000 });
     } catch (err: unknown) {
       const stderr = (err as { stderr?: string }).stderr || "";
       if (stderr.includes("No video formats found") || stderr.includes("unavailable")) {
@@ -143,25 +161,27 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const possibleFiles = [
-      `${tempPath}.${subLang}.srt`,
-      `${tempPath}.${subLang.split("-")[0]}.srt`,
-    ];
+    // 搜尋所有可能的輸出檔案（srt 或 vtt）
+    const dir = tmpdir();
+    const prefix = `yt-sub-${tempId}`;
+    const allFiles = await readdir(dir);
+    const matchedFiles = allFiles.filter(
+      (f) => f.startsWith(prefix) && (f.endsWith(".srt") || f.endsWith(".vtt"))
+    );
 
-    let srtContent = "";
-    let usedFile = "";
+    let subContent = "";
 
-    for (const file of possibleFiles) {
+    for (const file of matchedFiles) {
+      const fullPath = join(dir, file);
       try {
-        srtContent = await readFile(file, "utf-8");
-        usedFile = file;
+        subContent = await readFile(fullPath, "utf-8");
         break;
       } catch {
         continue;
       }
     }
 
-    if (!srtContent) {
+    if (!subContent) {
       const availableLangs = await listAvailableLangs(videoId);
       return NextResponse.json(
         {
@@ -172,11 +192,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (usedFile) {
-      unlink(usedFile).catch(() => {});
+    // 清理暫存檔
+    for (const file of matchedFiles) {
+      unlink(join(dir, file)).catch(() => {});
     }
 
-    const captions = parseSrt(srtContent);
+    const captions = parseSubtitle(subContent);
     const availableLangs = await listAvailableLangs(videoId);
 
     return NextResponse.json({ videoId, captions, availableLangs });
