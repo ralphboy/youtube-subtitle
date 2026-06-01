@@ -157,50 +157,53 @@ export async function POST(request: NextRequest) {
 
     const subLang = lang || "zh-TW";
 
-    // 建立語言變體清單，一次傳給 yt-dlp（避免多次呼叫觸發 rate limit）
+    // 逐一嘗試語言變體，成功就停止（避免多語言一次傳入時部分失敗導致全部中斷）
     const variants = LANG_VARIANTS[subLang] || [subLang, subLang.split("-")[0]];
-    const subLangPattern = [...new Set(variants)].join(",");
+    const uniqueVariants = [...new Set(variants)];
 
     const tempId = randomUUID();
-    const tempPath = join(tmpdir(), `yt-sub-${tempId}`);
-
-    // yt-dlp 會對不存在的語言報錯，但存在的語言仍會成功寫入，所以忽略錯誤
-    try {
-      await execFileAsync("yt-dlp", [
-        "--write-sub",
-        "--write-auto-sub",
-        "--sub-lang", subLangPattern,
-        "--sub-format", "srt/vtt/best",
-        "--skip-download",
-        "--no-abort-on-error",
-        "-o", tempPath,
-        `https://www.youtube.com/watch?v=${videoId}`,
-      ], { timeout: 60000 });
-    } catch {
-      // 即使報錯，檔案可能已寫入，繼續往下找
-    }
-
-    // 搜尋所有可能的輸出檔案（srt 或 vtt）
     const dir = tmpdir();
-    const prefix = `yt-sub-${tempId}`;
-    const allFiles = await readdir(dir);
-    const matchedFiles = allFiles.filter(
-      (f) => f.startsWith(prefix) && (f.endsWith(".srt") || f.endsWith(".vtt"))
-    );
-
     let subContent = "";
+    let matchedFiles: string[] = [];
 
-    for (const file of matchedFiles) {
-      const fullPath = join(dir, file);
+    for (const tryLang of uniqueVariants) {
+      const tempPath = join(dir, `yt-sub-${tempId}-${tryLang}`);
+
       try {
-        const content = await readFile(fullPath, "utf-8");
-        if (content.trim()) {
-          subContent = content;
-          break;
-        }
+        await execFileAsync("yt-dlp", [
+          "--write-sub",
+          "--write-auto-sub",
+          "--sub-lang", tryLang,
+          "--sub-format", "srt/vtt/best",
+          "--skip-download",
+          "-o", tempPath,
+          `https://www.youtube.com/watch?v=${videoId}`,
+        ], { timeout: 60000 });
       } catch {
+        // 這個語言失敗，試下一個
         continue;
       }
+
+      // 檢查是否有成功寫入的檔案
+      const prefix = `yt-sub-${tempId}-${tryLang}`;
+      const allFiles = await readdir(dir);
+      matchedFiles = allFiles.filter(
+        (f) => f.startsWith(prefix) && (f.endsWith(".srt") || f.endsWith(".vtt"))
+      );
+
+      for (const file of matchedFiles) {
+        try {
+          const content = await readFile(join(dir, file), "utf-8");
+          if (content.trim()) {
+            subContent = content;
+            break;
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      if (subContent) break;
     }
 
     if (!subContent) {
