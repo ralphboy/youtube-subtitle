@@ -1,65 +1,172 @@
-import Image from "next/image";
+"use client";
+
+import { useState, useCallback } from "react";
+
+interface Caption {
+  start: string;
+  dur: string;
+  text: string;
+}
+
+const LANG_OPTIONS = [
+  { value: "zh-TW", label: "繁體中文" },
+  { value: "zh-Hant", label: "中文（繁體）" },
+  { value: "zh", label: "中文" },
+  { value: "en", label: "English" },
+  { value: "ja", label: "日本語" },
+  { value: "ko", label: "한국어" },
+];
+
+function formatTime(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+}
 
 export default function Home() {
+  const [url, setUrl] = useState("");
+  const [lang, setLang] = useState("zh-TW");
+  const [captions, setCaptions] = useState<Caption[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [videoId, setVideoId] = useState("");
+
+  const fetchSubtitles = useCallback(async () => {
+    if (!url.trim()) return;
+
+    setLoading(true);
+    setError("");
+    setCaptions([]);
+    setVideoId("");
+
+    try {
+      const res = await fetch("/api/subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url.trim(), lang }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || "發生錯誤");
+        return;
+      }
+
+      setCaptions(data.captions);
+      setVideoId(data.videoId);
+    } catch {
+      setError("網路錯誤，請稍後再試");
+    } finally {
+      setLoading(false);
+    }
+  }, [url, lang]);
+
+  const fullText = captions.map((c) => c.text).join("\n");
+
+  const copyWithPrompt = useCallback(async () => {
+    const textWithPrompt = `請幫我整理下面文字重點：\n\n${fullText}`;
+    await navigator.clipboard.writeText(textWithPrompt);
+  }, [fullText]);
+
+  const copyToClipboard = useCallback(async () => {
+    await navigator.clipboard.writeText(fullText);
+  }, [fullText]);
+
+  const downloadText = useCallback(() => {
+    const blob = new Blob([fullText], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `subtitle-${videoId || "export"}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, [fullText, videoId]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main className="max-w-3xl mx-auto px-4 py-12">
+      <h1 className="text-3xl font-bold text-center mb-8">
+        YouTube 字幕擷取器
+      </h1>
+
+      <div className="flex flex-col gap-3 mb-6">
+        <input
+          type="text"
+          placeholder="貼上 YouTube 連結..."
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && fetchSubtitles()}
+          className="w-full px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+
+        <div className="flex gap-3">
+          <select
+            value={lang}
+            onChange={(e) => setLang(e.target.value)}
+            className="px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            {LANG_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+
+          <button
+            onClick={fetchSubtitles}
+            disabled={loading || !url.trim()}
+            className="flex-1 px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            Documentation
-          </a>
+            {loading ? "擷取中..." : "擷取字幕"}
+          </button>
         </div>
-      </main>
-    </div>
+      </div>
+
+      {error && (
+        <div className="p-4 mb-6 rounded-lg bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400">
+          {error}
+        </div>
+      )}
+
+      {captions.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-sm text-gray-500">
+              共 {captions.length} 段字幕
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={copyWithPrompt}
+                className="px-3 py-1.5 text-sm rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors"
+              >
+                複製給 AI 整理
+              </button>
+              <button
+                onClick={copyToClipboard}
+                className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              >
+                複製全部
+              </button>
+              <button
+                onClick={downloadText}
+                className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              >
+                下載 .txt
+              </button>
+            </div>
+          </div>
+
+          <div className="border border-gray-200 dark:border-gray-700 rounded-lg divide-y divide-gray-200 dark:divide-gray-700 max-h-[600px] overflow-y-auto">
+            {captions.map((caption, i) => (
+              <div key={i} className="flex gap-3 px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-900/50">
+                <span className="text-xs text-gray-400 font-mono pt-0.5 shrink-0">
+                  {formatTime(parseFloat(caption.start))}
+                </span>
+                <span className="text-sm">{caption.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </main>
   );
 }
