@@ -94,7 +94,7 @@ function parseSubtitle(content: string): Caption[] {
   return captions;
 }
 
-async function listAvailableLangs(videoId: string): Promise<string[]> {
+async function listAllLangs(videoId: string): Promise<string[]> {
   try {
     const { stdout } = await execFileAsync("yt-dlp", [
       "--list-subs",
@@ -115,7 +115,7 @@ async function listAvailableLangs(videoId: string): Promise<string[]> {
 
       if (inSection && line.trim()) {
         const langMatch = line.match(/^(\S+)/);
-        if (langMatch && !langMatch[1].includes("-")) {
+        if (langMatch) {
           langs.push(langMatch[1]);
         }
       }
@@ -126,6 +126,21 @@ async function listAvailableLangs(videoId: string): Promise<string[]> {
     return [];
   }
 }
+
+// 常見語言變體對照（地區變體放前面，基礎碼放最後，避免 yt-dlp 下載不存在的語言報錯中斷）
+const LANG_VARIANTS: Record<string, string[]> = {
+  "en": ["en-GB", "en-US", "en-AU", "en"],
+  "zh-TW": ["zh-TW", "zh-Hant", "zh"],
+  "zh-Hant": ["zh-Hant", "zh-TW", "zh"],
+  "zh": ["zh", "zh-TW", "zh-Hant", "zh-CN", "zh-Hans"],
+  "pt": ["pt-BR", "pt-PT", "pt"],
+  "es": ["es-419", "es-ES", "es"],
+  "fr": ["fr-FR", "fr-CA", "fr"],
+  "de": ["de-DE", "de"],
+  "ja": ["ja-JP", "ja"],
+  "ko": ["ko-KR", "ko"],
+};
+
 
 export async function POST(request: NextRequest) {
   try {
@@ -141,24 +156,28 @@ export async function POST(request: NextRequest) {
     }
 
     const subLang = lang || "zh-TW";
+
+    // 建立語言變體清單，一次傳給 yt-dlp（避免多次呼叫觸發 rate limit）
+    const variants = LANG_VARIANTS[subLang] || [subLang, subLang.split("-")[0]];
+    const subLangPattern = [...new Set(variants)].join(",");
+
     const tempId = randomUUID();
     const tempPath = join(tmpdir(), `yt-sub-${tempId}`);
 
+    // yt-dlp 會對不存在的語言報錯，但存在的語言仍會成功寫入，所以忽略錯誤
     try {
       await execFileAsync("yt-dlp", [
         "--write-sub",
         "--write-auto-sub",
-        "--sub-lang", subLang,
+        "--sub-lang", subLangPattern,
         "--sub-format", "srt/vtt/best",
         "--skip-download",
+        "--no-abort-on-error",
         "-o", tempPath,
         `https://www.youtube.com/watch?v=${videoId}`,
       ], { timeout: 60000 });
-    } catch (err: unknown) {
-      const stderr = (err as { stderr?: string }).stderr || "";
-      if (stderr.includes("No video formats found") || stderr.includes("unavailable")) {
-        return NextResponse.json({ error: "影片不存在或無法存取" }, { status: 404 });
-      }
+    } catch {
+      // 即使報錯，檔案可能已寫入，繼續往下找
     }
 
     // 搜尋所有可能的輸出檔案（srt 或 vtt）
@@ -174,19 +193,23 @@ export async function POST(request: NextRequest) {
     for (const file of matchedFiles) {
       const fullPath = join(dir, file);
       try {
-        subContent = await readFile(fullPath, "utf-8");
-        break;
+        const content = await readFile(fullPath, "utf-8");
+        if (content.trim()) {
+          subContent = content;
+          break;
+        }
       } catch {
         continue;
       }
     }
 
     if (!subContent) {
-      const availableLangs = await listAvailableLangs(videoId);
+      const availableLangs = await listAllLangs(videoId);
+      const mainLangs = availableLangs.filter((l) => !l.includes("-") || l === "zh-TW" || l === "zh-Hant" || l === "en-GB" || l === "en-US" || l === "pt-BR" || l === "pt-PT" || l === "es-419" || l === "fr-FR" || l === "de-DE");
       return NextResponse.json(
         {
           error: `找不到「${subLang}」的字幕`,
-          availableLangs,
+          availableLangs: mainLangs,
         },
         { status: 404 }
       );
@@ -198,7 +221,7 @@ export async function POST(request: NextRequest) {
     }
 
     const captions = parseSubtitle(subContent);
-    const availableLangs = await listAvailableLangs(videoId);
+    const availableLangs: string[] = [];
 
     return NextResponse.json({ videoId, captions, availableLangs });
   } catch (error: unknown) {
